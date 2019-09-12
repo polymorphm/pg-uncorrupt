@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+
+import collections
+import sys
+import argparse
+import shlex
+import struct
+import os, os.path
+
+BLCKSZ = 8192
+RELSEG_SIZE = 131072
+PG_PAGE_LAYOUT_VERSION = 4
+DEFAULT_RSH_COMMAND = 'ssh --'
+
+class ExtrPageHdrError(Exception):
+    pass
+
+class InvalidSizeExtrPageHdrError(ExtrPageHdrError):
+    pass
+
+PageHdr = collections.namedtuple('PageHdr', [
+    'pd_lsn',
+    'pd_checksum',
+    'pd_flags',
+    'pd_lower',
+    'pd_upper',
+    'pd_special',
+    'pd_pagesize_version',
+    'pd_prune_xid',
+])
+
+def extract_page_hdr(page_bytes):
+    if not page_bytes:
+        return PageHdr(
+            pd_lsn=0,
+            pd_checksum=0,
+            pd_flags=0,
+            pd_lower=0,
+            pd_upper=0,
+            pd_special=0,
+            pd_pagesize_version=0,
+            pd_prune_xid=0,
+        )
+    
+    if len(page_bytes) != BLCKSZ:
+        raise InvalidSizeExtrPageHdrError(
+            'invalid page size: {!r}'.format(len(page_bytes))
+        )
+    
+    spl = struct.unpack(str('@LHHHHHHI'), page_bytes[:24])
+    
+    return PageHdr(
+        pd_lsn=spl[0],
+        pd_checksum=spl[1],
+        pd_flags=spl[2],
+        pd_lower=spl[3],
+        pd_upper=spl[4],
+        pd_special=spl[5],
+        pd_pagesize_version=spl[6],
+        pd_prune_xid=spl[7],
+    )
+
+def is_page_hdr_empty(page_hdr):
+    return not page_hdr.pd_lsn and \
+            not page_hdr.pd_checksum and \
+            not page_hdr.pd_flags and \
+            not page_hdr.pd_lower and \
+            not page_hdr.pd_upper and \
+            not page_hdr.pd_special and \
+            not page_hdr.pd_pagesize_version and \
+            not page_hdr.pd_prune_xid
+
+def is_page_hdr_valid(page_hdr, page_bytes):
+    # XXX   it might be a good idea to also implement of checking
+    #       the ``page_bytes`` via the ``page_hdr.pd_checksum`` value
+    
+    return page_hdr.pd_pagesize_version == BLCKSZ | PG_PAGE_LAYOUT_VERSION
+
+def split_file_path(file_path):
+    # we expect paths like this:
+    #       user-name@server-name:/path/to/data
+    #
+    # the function's result would be:
+    #       server='user-name@server-name'
+    #       local_path='/path/to/data'
+    
+    file_path_spl = file_path.split(':', 1)
+    
+    if len(file_path_spl) == 1:
+        return None, file_path_spl[0]
+    
+    assert len(file_path_spl) == 2
+    
+    if not file_path_spl[0]:
+        return None, file_path_spl[1]
+    
+    return file_path_spl[0], file_path_spl[1]
+
+def local_read_page(local_path, offset):
+    if not os.path.isfile(local_path):
+        return b''
+    
+    with open(local_path, 'rb') as fd:
+        fd.seek(BLCKSZ * offset)
+        page_bytes = fd.read(BLCKSZ)
+    
+    return page_bytes
+
+def local_write_page(local_path, offset, page_bytes):
+    with open(local_path, 'w+b') as fd:
+        fd.seek(BLCKSZ * offset)
+        fd.write(page_bytes)
+
+def remote_read_page(server, local_path, offset):
+    raise NotImplementedError
+
+def remote_write_page(server, local_path, offset, page_bytes):
+    raise NotImplementedError
+
+def read_page(file_path, offset):
+    server, local_path = split_file_path(file_path)
+    
+    if server is None:
+        return local_read_page(local_path, offset)
+    
+    return remote_read_page(server, local_path, offset)
+
+def write_page(file_path, offset, page_bytes):
+    server, local_path = split_file_path(file_path)
+    
+    if server is None:
+        local_write_page(local_path, offset, page_bytes)
+        return
+    
+    remote_write_page(server, local_path, offset, page_bytes)
+
+def pg_uncorrupt_command(verbose, pretend, rsh_command_spl, page_num, rel,
+        src_data, dst_data):
+    if page_num < RELSEG_SIZE:
+        src_file = '{}/{}'.format(src_data, rel)
+    else:
+        src_file = '{}/{}.{}'.format(src_data, rel, page_num // RELSEG_SIZE)
+    
+    if page_num < RELSEG_SIZE:
+        dst_file = '{}/{}'.format(dst_data, rel)
+    else:
+        dst_file = '{}/{}.{}'.format(dst_data, rel, page_num // RELSEG_SIZE)
+    
+    file_offset = page_num % RELSEG_SIZE
+    
+    if verbose:
+        print('source file: {!r}'.format(src_file))
+        print('destination file: {!r}'.format(dst_file))
+        print('file offset: {!r}'.format(file_offset))
+    
+    src_page_bytes = read_page(src_file, file_offset)
+    src_page_hdr = extract_page_hdr(src_page_bytes)
+    
+    if verbose:
+        print('source page header\'s content:\n{}{!r}'.format(
+                ' ' * 2, src_page_hdr))
+    
+    dst_page_bytes = read_page(dst_file, file_offset)
+    dst_page_hdr = extract_page_hdr(dst_page_bytes)
+    
+    if verbose:
+        print('destination page header\'s content:\n{}{!r}'.format(
+                ' ' * 2, dst_page_hdr))
+    
+    src_page_is_empty = is_page_hdr_empty(src_page_hdr)
+    dst_page_is_empty = is_page_hdr_empty(dst_page_hdr)
+    
+    if verbose:
+        print('source page is empty: {!r}'.format(src_page_is_empty))
+        print('destination page is empty: {!r}'.format(dst_page_is_empty))
+    
+    if src_page_is_empty:
+        print('source page is empty! stop replacing the page', file=sys.stderr)
+        return 1
+    
+    if dst_page_is_empty:
+        print('destination page is empty! stop replacing the page',
+                file=sys.stderr)
+        return 1
+    
+    src_page_is_valid = is_page_hdr_valid(src_page_hdr, src_page_bytes)
+    dst_page_is_valid = is_page_hdr_valid(dst_page_hdr, dst_page_bytes)
+    hdrs_are_eq = src_page_hdr == dst_page_hdr
+    
+    if verbose:
+        print('source page header is valid: {!r}'.format(src_page_is_valid))
+        print('destination page header is valid: {!r}'.format(dst_page_is_valid))
+        print('page headers are equivalent: {!r}'.format(hdrs_are_eq))
+    
+    if not src_page_is_valid:
+        print('source page header is invalid! stop replacing the page',
+                file=sys.stderr)
+        return 1
+    
+    if dst_page_is_valid:
+        if hdrs_are_eq:
+            print(
+                'destination page header is already valid, '
+                        'and page headers are already equivalent! '
+                        'stop replacing the page',
+                file=sys.stderr,
+            )
+        else:
+            print(
+                'destination page header is already valid, '
+                        'but page headers aren\'t equivalent! '
+                        'stop replacing the page',
+                file=sys.stderr,
+            )
+        return 1
+    
+    if pretend:
+        if verbose:
+            print('replacing the page successfully! '
+                    '(really no! we are just pretending)')
+        return
+    
+    write_page(dst_file, file_offset, src_page_bytes)
+    
+    if verbose:
+         print('replacing the page successfully!')
+
+def unsigned_int(x):
+    i = int(x)
+    
+    if i < 0:
+        raise ValueError('invalid unsigned int value: {!r}'.format(i))
+    
+    return i
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='An one-file utility to easy recovering Postgres\'s '
+                'bad-pages from a standby copy',
+    )
+    
+    parser.add_argument(
+        '-v',
+        '--verbose',
+        action='store_true',
+        help='be verbose',
+    )
+    
+    parser.add_argument(
+        '-p',
+        '--pretend',
+        action='store_true',
+        help='stop before writing anything',
+    )
+    
+    parser.add_argument(
+        '-e',
+        '--rsh',
+        metavar='COMMAND',
+        help='specify the remote shell to use',
+    )
+    
+    parser.add_argument(
+        'page_num',
+        type=unsigned_int,
+        help='page number',
+    )
+    
+    parser.add_argument(
+        'rel',
+        help='relation',
+    )
+    
+    parser.add_argument(
+        'src_data',
+        help='source data path',
+    )
+    
+    parser.add_argument(
+        'dst_data',
+        help='destination data path',
+    )
+    
+    args = parser.parse_args()
+    
+    rsh_command = args.rsh
+    
+    if rsh_command is None:
+        rsh_command = DEFAULT_RSH_COMMAND
+    
+    rsh_command_spl = shlex.split(rsh_command)
+    
+    exit_code = pg_uncorrupt_command(
+        args.verbose,
+        args.pretend,
+        rsh_command_spl,
+        args.page_num,
+        args.rel,
+        args.src_data,
+        args.dst_data,
+    )
+    
+    if exit_code:
+        exit(exit_code)
+
+if __name__ == '__main__':
+    main()
+
+# vi:filetype=python:ts=4:sw=4:et
