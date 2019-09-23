@@ -146,7 +146,7 @@ def remote_write_page(rsh_command_spl, server, local_path, offset, page_bytes):
     dd_cmd_spl = ['dd', 'bs={}'.format(BLCKSZ), 'skip={}'.format(offset),
             'if={}'.format(local_path)]
     
-    shell_cmd_str = 'dd bs={Q_BLCKSZ} count=1 seek={q_offset} ' \
+    shell_cmd_str = 'dd conv=nocreat,notrunc bs={Q_BLCKSZ} count=1 seek={q_offset} ' \
             'of={q_local_path}'.format(
         Q_BLCKSZ=int(BLCKSZ),
         q_offset=int(offset),
