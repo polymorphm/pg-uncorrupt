@@ -182,14 +182,16 @@ def write_page(rsh_command_spl, file_path, offset, page_bytes):
     
     remote_write_page(rsh_command_spl, server, local_path, offset, page_bytes)
 
-def pg_uncorrupt_command(verbose, pretend, rsh_command_spl, page_num, rel,
+def pg_uncorrupt_command(verbose, pretend, rsh_command_spl, dump, page_num, rel,
         src_data, dst_data):
     if page_num < RELSEG_SIZE:
         src_file = '{}/{}'.format(src_data, rel)
     else:
         src_file = '{}/{}.{}'.format(src_data, rel, page_num // RELSEG_SIZE)
     
-    if page_num < RELSEG_SIZE:
+    if dump:
+        dump_file = dst_data
+    elif page_num < RELSEG_SIZE:
         dst_file = '{}/{}'.format(dst_data, rel)
     else:
         dst_file = '{}/{}.{}'.format(dst_data, rel, page_num // RELSEG_SIZE)
@@ -198,7 +200,10 @@ def pg_uncorrupt_command(verbose, pretend, rsh_command_spl, page_num, rel,
     
     if verbose:
         print('source file: {!r}'.format(src_file))
-        print('destination file: {!r}'.format(dst_file))
+        if dump:
+            print('destination file (dump): {!r}'.format(dump_file))
+        else:
+            print('destination file: {!r}'.format(dst_file))
         print('file offset: {!r}'.format(file_offset))
     
     try:
@@ -212,6 +217,27 @@ def pg_uncorrupt_command(verbose, pretend, rsh_command_spl, page_num, rel,
     if verbose:
         print('source page header\'s content:\n{}{!r}'.format(
                 ' ' * 2, src_page_hdr))
+    
+    if dump:
+        # dump mode! and exit
+        
+        if pretend:
+            if verbose:
+                print('dumping the page successfully! '
+                        '(really no! we are just pretending)')
+            return
+        
+        try:
+            write_page(rsh_command_spl, dump_file, 0, src_page_bytes)
+        except OSError as e:
+            print('dumping file writing error: {!r}: {}'.format(type(e), str(e)),
+                    file=sys.stderr)
+            return 1
+        
+        if verbose:
+             print('dumping the page successfully!')
+        
+        return
     
     try:
         dst_page_bytes = read_page(rsh_command_spl, dst_file, file_offset)
@@ -324,6 +350,13 @@ def main():
     )
     
     parser.add_argument(
+        '-d',
+        '--dump',
+        action='store_true',
+        help='dump page to file only. do not perform a recovering procedure',
+    )
+    
+    parser.add_argument(
         'page_num',
         type=unsigned_int,
         help='page number',
@@ -357,6 +390,7 @@ def main():
         args.verbose,
         args.pretend,
         rsh_command_spl,
+        args.dump,
         args.page_num,
         args.rel,
         args.src_data,

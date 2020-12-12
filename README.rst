@@ -73,8 +73,7 @@ recovery the bad page::
 Full options list is in the help page of the utility::
 
     $ ./pg-uncorrupt -h
-    
-    usage: pg-uncorrupt [-h] [-v] [-p] [-e COMMAND] page_num rel src_data dst_data
+    usage: pg-uncorrupt [-h] [-v] [-p] [-e COMMAND] [-d] page_num rel src_data dst_data
     
     An one-file utility to easy recovering Postgres's bad-pages from a standby copy
     
@@ -90,3 +89,4 @@ Full options list is in the help page of the utility::
       -p, --pretend         stop before writing anything
       -e COMMAND, --rsh COMMAND
                             specify the remote shell to use
+      -d, --dump            dump page to file only. do not perform a recovering procedure
