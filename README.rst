@@ -7,7 +7,7 @@ bad-pages from a standby copy.
 Status
 ------
 
-The developer version (``git``'s master branch).
+v2.0 release.
 
 Usage Example
 -------------
